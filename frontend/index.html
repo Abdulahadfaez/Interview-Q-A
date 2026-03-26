@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Interview Q&A Practice - Login</title>
+    <script src="auth.js"></script>
+    <script src="ui.js"></script>
     <style>
         * {
             margin: 0;
@@ -220,8 +222,8 @@
             </div>
 
             <div class="toggle-forms">
-                <button class="toggle-btn active" onclick="switchForm('login')">Login</button>
-                <button class="toggle-btn" onclick="switchForm('register')">Register</button>
+                <button class="toggle-btn active" onclick="switchForm('login', this)">Login</button>
+                <button class="toggle-btn" onclick="switchForm('register', this)">Register</button>
             </div>
 
             <!-- Login Form -->
@@ -274,14 +276,16 @@
     </div>
 
     <script>
-        const API_URL = 'http://localhost:5000';
+        const API_URL = window.APP_API_URL;
 
-        function switchForm(form) {
+        function switchForm(form, button) {
             document.querySelectorAll('.form-section').forEach(f => f.classList.remove('active'));
             document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
             
             document.getElementById(`${form}-form`).classList.add('active');
-            event.target.classList.add('active');
+            if (button) {
+                button.classList.add('active');
+            }
             
             // Clear error messages
             document.getElementById('login-error').classList.remove('show');
@@ -309,7 +313,7 @@
 
         async function handleLogin(event) {
             event.preventDefault();
-            
+
             const username = document.getElementById('login-username').value;
             const password = document.getElementById('login-password').value;
 
@@ -317,27 +321,14 @@
             showLoading('login-loading');
 
             try {
-                const response = await fetch(`${API_URL}/auth/login`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, password })
-                });
+                await authManager.login(username, password);
+                ui.showToast('Login successful. Redirecting...', 'success');
 
-                const data = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(data.error || 'Login failed');
-                }
-
-                // Save token and redirect
-                localStorage.setItem('token', data.token);
-                localStorage.setItem('userId', data.userId);
-                localStorage.setItem('userName', data.name);
-                
                 // Redirect to dashboard
                 window.location.href = 'dashboard.html';
             } catch (error) {
                 showError('login-error', error.message);
+                ui.showToast(error.message, 'error');
             } finally {
                 hideLoading('login-loading');
             }
@@ -355,38 +346,27 @@
             showLoading('register-loading');
 
             try {
-                const response = await fetch(`${API_URL}/auth/register`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name, username, email, password })
-                });
-
-                const data = await response.json();
-
-                if (!response.ok) {
-                    throw new Error(data.error || 'Registration failed');
-                }
+                await authManager.register({ name, username, email, password });
 
                 // Show success message
                 document.getElementById('register-success').textContent = 'Registration successful! Logging in...';
                 document.getElementById('register-success').classList.add('show');
+                ui.showToast('Registration successful.', 'success');
 
-                // Save token and redirect
+                // Redirect to dashboard
                 setTimeout(() => {
-                    localStorage.setItem('token', data.token);
-                    localStorage.setItem('userId', data.userId);
-                    localStorage.setItem('userName', name);
                     window.location.href = 'dashboard.html';
                 }, 1500);
             } catch (error) {
                 showError('register-error', error.message);
+                ui.showToast(error.message, 'error');
             } finally {
                 hideLoading('register-loading');
             }
         }
 
         // Check if user is already logged in
-        if (localStorage.getItem('token')) {
+        if (authManager.isAuthenticated()) {
             window.location.href = 'dashboard.html';
         }
     </script>

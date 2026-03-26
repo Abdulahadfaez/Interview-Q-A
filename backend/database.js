@@ -1,27 +1,166 @@
+const fs = require('fs');
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 
+let mysql;
+try {
+  mysql = require('mysql2/promise');
+} catch (error) {
+  mysql = null;
+}
+
 let db;
+let mysqlPool;
+let mysqlReadyPromise;
 
 function getDatabase() {
   if (db) return db;
-  
-  db = new sqlite3.Database(path.join(__dirname, 'app.db'), (err) => {
-    if (err) {
-      console.error('Database connection error:', err);
-    } else {
-      console.log('Connected to SQLite database');
-      initializeTables();
-    }
-  });
-  
+
+  const dialect = getDialect();
+  db = dialect === 'mysql' ? createMySqlAdapter() : createSqliteAdapter();
   return db;
 }
 
-function initializeTables() {
-  db.serialize(() => {
+function getDialect() {
+  if (process.env.DB_DIALECT) {
+    return process.env.DB_DIALECT.toLowerCase();
+  }
+
+  if (process.env.DATABASE_URL || process.env.MYSQL_URL || process.env.AIVEN_MYSQL_URL || process.env.DB_HOST) {
+    return 'mysql';
+  }
+
+  return 'sqlite';
+}
+
+function createSqliteAdapter() {
+  const databasePath = process.env.DB_PATH || path.join(__dirname, 'app.db');
+  const sqliteDb = new sqlite3.Database(databasePath, (err) => {
+    if (err) {
+      console.error('Database connection error:', err);
+    } else {
+      console.log(`Using SQLite database at ${databasePath}`);
+      console.log('Connected to SQLite database');
+      initializeSqliteTables(sqliteDb);
+    }
+  });
+
+  return {
+    dialect: 'sqlite',
+    run(sql, params, callback) {
+      return sqliteDb.run(sql, params, callback);
+    },
+    get(sql, params, callback) {
+      return sqliteDb.get(sql, params, callback);
+    },
+    all(sql, params, callback) {
+      return sqliteDb.all(sql, params, callback);
+    }
+  };
+}
+
+function createMySqlAdapter() {
+  if (!mysql) {
+    throw new Error('mysql2 is required for MySQL support. Run npm install mysql2.');
+  }
+
+  mysqlPool = mysql.createPool(buildMySqlConfig());
+  mysqlReadyPromise = initializeMySqlTables(mysqlPool);
+
+  return {
+    dialect: 'mysql',
+    run(sql, params, callback) {
+      const values = typeof params === 'function' || params == null ? [] : params;
+      const cb = typeof params === 'function' ? params : callback;
+
+      mysqlReadyPromise
+        .then(() => mysqlPool.execute(sql, values))
+        .then(([result]) => {
+          if (cb) cb.call({ lastID: result.insertId || 0, changes: result.affectedRows || 0 }, null);
+        })
+        .catch((error) => {
+          if (cb) cb.call({ lastID: 0, changes: 0 }, error);
+        });
+    },
+    get(sql, params, callback) {
+      const values = typeof params === 'function' || params == null ? [] : params;
+      const cb = typeof params === 'function' ? params : callback;
+
+      mysqlReadyPromise
+        .then(() => mysqlPool.execute(sql, values))
+        .then(([rows]) => {
+          if (cb) cb(null, rows[0]);
+        })
+        .catch((error) => {
+          if (cb) cb(error);
+        });
+    },
+    all(sql, params, callback) {
+      const values = typeof params === 'function' || params == null ? [] : params;
+      const cb = typeof params === 'function' ? params : callback;
+
+      mysqlReadyPromise
+        .then(() => mysqlPool.execute(sql, values))
+        .then(([rows]) => {
+          if (cb) cb(null, rows);
+        })
+        .catch((error) => {
+          if (cb) cb(error);
+        });
+    }
+  };
+}
+
+function buildMySqlConfig() {
+  const uri = process.env.DATABASE_URL || process.env.MYSQL_URL || process.env.AIVEN_MYSQL_URL;
+  const ssl = buildSslConfig();
+
+  if (uri) {
+    const parsed = new URL(uri);
+    return {
+      host: parsed.hostname,
+      port: Number(parsed.port || 3306),
+      user: decodeURIComponent(parsed.username),
+      password: decodeURIComponent(parsed.password),
+      database: parsed.pathname.replace(/^\//, ''),
+      waitForConnections: true,
+      connectionLimit: 10,
+      queueLimit: 0,
+      ssl
+    };
+  }
+
+  return {
+    host: process.env.DB_HOST,
+    port: Number(process.env.DB_PORT || 3306),
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0,
+    ssl
+  };
+}
+
+function buildSslConfig() {
+  const caFromEnv = process.env.DB_SSL_CA ? process.env.DB_SSL_CA.replace(/\\n/g, '\n') : null;
+  const caFromPath = process.env.DB_SSL_CA_PATH ? fs.readFileSync(process.env.DB_SSL_CA_PATH, 'utf8') : null;
+
+  if (!caFromEnv && !caFromPath && process.env.DB_SSL !== 'true') {
+    return undefined;
+  }
+
+  return {
+    ca: caFromEnv || caFromPath || undefined,
+    rejectUnauthorized: true
+  };
+}
+
+function initializeSqliteTables(sqliteDb) {
+  sqliteDb.serialize(() => {
     // Users table
-    db.run(`CREATE TABLE IF NOT EXISTS users (
+    sqliteDb.run(`CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
       email TEXT UNIQUE NOT NULL,
@@ -31,7 +170,7 @@ function initializeTables() {
     )`);
 
     // Categories table
-    db.run(`CREATE TABLE IF NOT EXISTS categories (
+    sqliteDb.run(`CREATE TABLE IF NOT EXISTS categories (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
       description TEXT,
@@ -39,7 +178,7 @@ function initializeTables() {
     )`);
 
     // Levels table
-    db.run(`CREATE TABLE IF NOT EXISTS levels (
+    sqliteDb.run(`CREATE TABLE IF NOT EXISTS levels (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       category_id INTEGER NOT NULL,
       name TEXT NOT NULL,
@@ -51,7 +190,7 @@ function initializeTables() {
     )`);
 
     // Questions table
-    db.run(`CREATE TABLE IF NOT EXISTS questions (
+    sqliteDb.run(`CREATE TABLE IF NOT EXISTS questions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       level_id INTEGER NOT NULL,
       question TEXT NOT NULL,
@@ -65,7 +204,7 @@ function initializeTables() {
     )`);
 
     // User Progress table
-    db.run(`CREATE TABLE IF NOT EXISTS user_progress (
+    sqliteDb.run(`CREATE TABLE IF NOT EXISTS user_progress (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       level_id INTEGER NOT NULL,
@@ -78,7 +217,7 @@ function initializeTables() {
     )`);
 
     // Badges table
-    db.run(`CREATE TABLE IF NOT EXISTS badges (
+    sqliteDb.run(`CREATE TABLE IF NOT EXISTS badges (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       level_id INTEGER NOT NULL,
@@ -89,6 +228,21 @@ function initializeTables() {
       FOREIGN KEY (level_id) REFERENCES levels(id)
     )`);
 
+    // Refresh Tokens table for JWT security
+    sqliteDb.run(`CREATE TABLE IF NOT EXISTS refresh_tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      token TEXT UNIQUE NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )`);
+
+    sqliteDb.run('CREATE INDEX IF NOT EXISTS idx_levels_category_order ON levels(category_id, sequence_order)');
+    sqliteDb.run('CREATE INDEX IF NOT EXISTS idx_questions_level_id ON questions(level_id)');
+    sqliteDb.run('CREATE INDEX IF NOT EXISTS idx_user_progress_user_level ON user_progress(user_id, level_id)');
+    sqliteDb.run('CREATE INDEX IF NOT EXISTS idx_badges_user_id ON badges(user_id)');
+    sqliteDb.run('CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user_id ON refresh_tokens(user_id)');
+
     // Seed initial data
     seedData();
     // Ensure each level has at least 10 questions (useful when DB already exists)
@@ -96,6 +250,102 @@ function initializeTables() {
       fillQuestionsToTen();
     }, 200);
   });
+}
+
+async function initializeMySqlTables(pool) {
+  const { database } = buildMySqlConfig();
+  console.log(`Using MySQL database ${database}`);
+  console.log('Connected to MySQL database');
+
+  await pool.execute(`CREATE TABLE IF NOT EXISTS users (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    username VARCHAR(255) UNIQUE NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    password VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  await pool.execute(`CREATE TABLE IF NOT EXISTS categories (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    icon VARCHAR(255)
+  )`);
+
+  await pool.execute(`CREATE TABLE IF NOT EXISTS levels (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    category_id INT NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    difficulty VARCHAR(255),
+    min_age INT,
+    max_age INT,
+    sequence_order INT,
+    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+  )`);
+
+  await pool.execute(`CREATE TABLE IF NOT EXISTS questions (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    level_id INT NOT NULL,
+    question TEXT NOT NULL,
+    option_a TEXT NOT NULL,
+    option_b TEXT NOT NULL,
+    option_c TEXT NOT NULL,
+    option_d TEXT NOT NULL,
+    correct_answer VARCHAR(10) NOT NULL,
+    explanation TEXT,
+    FOREIGN KEY (level_id) REFERENCES levels(id) ON DELETE CASCADE
+  )`);
+
+  await pool.execute(`CREATE TABLE IF NOT EXISTS user_progress (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    level_id INT NOT NULL,
+    status VARCHAR(50) DEFAULT 'locked',
+    completed_at TIMESTAMP NULL,
+    score INT,
+    UNIQUE KEY uniq_user_level (user_id, level_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (level_id) REFERENCES levels(id) ON DELETE CASCADE
+  )`);
+
+  await pool.execute(`CREATE TABLE IF NOT EXISTS badges (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    level_id INT NOT NULL,
+    badge_name VARCHAR(255) NOT NULL,
+    earned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uniq_badge_user_level (user_id, level_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (level_id) REFERENCES levels(id) ON DELETE CASCADE
+  )`);
+
+  await pool.execute(`CREATE TABLE IF NOT EXISTS refresh_tokens (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    token TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  )`);
+
+  await safeMySqlExecute(pool, 'CREATE INDEX idx_levels_category_order ON levels(category_id, sequence_order)');
+  await safeMySqlExecute(pool, 'CREATE INDEX idx_questions_level_id ON questions(level_id)');
+  await safeMySqlExecute(pool, 'CREATE INDEX idx_user_progress_user_level ON user_progress(user_id, level_id)');
+  await safeMySqlExecute(pool, 'CREATE INDEX idx_badges_user_id ON badges(user_id)');
+  await safeMySqlExecute(pool, 'CREATE INDEX idx_refresh_tokens_user_id ON refresh_tokens(user_id)');
+
+  await seedDataMySql(pool);
+  await fillQuestionsToTenMySql(pool);
+}
+
+async function safeMySqlExecute(pool, sql) {
+  try {
+    await pool.execute(sql);
+  } catch (error) {
+    if (!['ER_DUP_KEYNAME', 'ER_DUP_FIELDNAME'].includes(error.code)) {
+      throw error;
+    }
+  }
 }
 
 function seedData() {
@@ -847,10 +1097,10 @@ function fillQuestionsToTen() {
           const candidates = getQuestionsForCategory(row.category_name, row.difficulty);
 
           for (let i = 0; i < needed; i++) {
-            const q = candidates[(existing + i) % candidates.length] || {
+            const q = normalizeQuestion(candidates[(existing + i) % candidates.length] || {
               question: `Auto-generated question ${existing + i + 1}`,
               option_a: 'A', option_b: 'B', option_c: 'C', option_d: 'D', correct_answer: 'A', explanation: ''
-            };
+            });
 
             db.run(
               `INSERT INTO questions (level_id, question, option_a, option_b, option_c, option_d, correct_answer, explanation)
@@ -864,14 +1114,109 @@ function fillQuestionsToTen() {
   );
 }
 
+function normalizeQuestion(question) {
+  return {
+    question: question.question || 'Untitled question',
+    option_a: question.option_a || 'Option A',
+    option_b: question.option_b || 'Option B',
+    option_c: question.option_c || 'Option C',
+    option_d: question.option_d || 'Option D',
+    correct_answer: question.correct_answer || 'A',
+    explanation: question.explanation || ''
+  };
+}
+
 function insertQuestions(levelId, questions) {
   questions.forEach(q => {
+    const normalized = normalizeQuestion(q);
     db.run(
       `INSERT INTO questions (level_id, question, option_a, option_b, option_c, option_d, correct_answer, explanation) 
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [levelId, q.question, q.option_a, q.option_b, q.option_c, q.option_d, q.correct_answer, q.explanation]
+      [levelId, normalized.question, normalized.option_a, normalized.option_b, normalized.option_c, normalized.option_d, normalized.correct_answer, normalized.explanation]
     );
   });
+}
+
+async function insertQuestionsMySql(pool, levelId, questions) {
+  for (const q of questions) {
+    const normalized = normalizeQuestion(q);
+    await pool.execute(
+      `INSERT INTO questions (level_id, question, option_a, option_b, option_c, option_d, correct_answer, explanation)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [levelId, normalized.question, normalized.option_a, normalized.option_b, normalized.option_c, normalized.option_d, normalized.correct_answer, normalized.explanation]
+    );
+  }
+}
+
+async function fillQuestionsToTenMySql(pool) {
+  const [rows] = await pool.execute(
+    `SELECT l.id as level_id, l.difficulty, c.name as category_name
+     FROM levels l
+     JOIN categories c ON l.category_id = c.id`
+  );
+
+  for (const row of rows) {
+    const [countRows] = await pool.execute('SELECT COUNT(*) AS count FROM questions WHERE level_id = ?', [row.level_id]);
+    const existing = (countRows[0] && countRows[0].count) ? countRows[0].count : 0;
+    if (existing >= 10) continue;
+
+    const needed = 10 - existing;
+    const candidates = getQuestionsForCategory(row.category_name, row.difficulty);
+
+    for (let i = 0; i < needed; i++) {
+      const q = normalizeQuestion(candidates[(existing + i) % candidates.length] || {
+        question: `Auto-generated question ${existing + i + 1}`,
+        option_a: 'A', option_b: 'B', option_c: 'C', option_d: 'D', correct_answer: 'A', explanation: ''
+      });
+
+      await pool.execute(
+        `INSERT INTO questions (level_id, question, option_a, option_b, option_c, option_d, correct_answer, explanation)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [row.level_id, q.question, q.option_a, q.option_b, q.option_c, q.option_d, q.correct_answer, q.explanation]
+      );
+    }
+  }
+}
+
+async function insertLevelsAndQuestionsMySql(pool) {
+  const [categories] = await pool.execute('SELECT id, name FROM categories');
+
+  for (const category of categories) {
+    const levels = getDefaultLevels(category.id, category.name);
+
+    for (const level of levels) {
+      const [result] = await pool.execute(
+        'INSERT INTO levels (category_id, name, difficulty, min_age, max_age, sequence_order) VALUES (?, ?, ?, ?, ?, ?)',
+        [level.category_id, level.name, level.difficulty, level.min_age, level.max_age, level.sequence_order]
+      );
+
+      if (level.questions) {
+        await insertQuestionsMySql(pool, result.insertId, level.questions);
+      }
+    }
+  }
+}
+
+async function seedDataMySql(pool) {
+  const [rows] = await pool.execute('SELECT COUNT(*) AS count FROM categories');
+  if (rows[0] && rows[0].count > 0) return;
+
+  const categories = [
+    { name: 'C Programming', description: 'Master C programming concepts', icon: '💻' },
+    { name: 'Aptitude', description: 'Logical reasoning and mathematical aptitude', icon: '🧠' },
+    { name: 'Technical MCQs', description: 'General technical knowledge', icon: '⚙️' },
+    { name: 'Data Structures', description: 'DSA fundamentals and practice', icon: '📊' },
+    { name: 'Web Development', description: 'HTML, CSS, JavaScript basics', icon: '🌐' }
+  ];
+
+  for (const cat of categories) {
+    await pool.execute(
+      'INSERT INTO categories (name, description, icon) VALUES (?, ?, ?)',
+      [cat.name, cat.description, cat.icon]
+    );
+  }
+
+  await insertLevelsAndQuestionsMySql(pool);
 }
 
 module.exports = { getDatabase };

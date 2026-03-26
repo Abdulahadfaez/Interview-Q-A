@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: interview-qa-practice
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    plan: free
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      - key: REFRESH_TOKEN_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 24h
+      - key: REFRESH_TOKEN_EXPIRES_IN
+        value: 7d
+      - key: DB_PATH
+        value: /var/data/app.db
+      - key: FRONTEND_URLS
+        sync: false
+    disk:
+      name: interview-qa-data
+      mountPath: /var/data
+      sizeGB: 1

@@ -1,0 +1,8 @@
+{
+  "name": "interview-qa-practice",
+  "private": true,
+  "scripts": {
+    "backend": "npm --prefix backend start",
+    "start": "npm run backend"
+  }
+}

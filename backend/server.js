@@ -1,17 +1,50 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const path = require('path');
 const { getDatabase } = require('./database');
 
 const app = express();
 const db = getDatabase();
+const isMySql = db.dialect === 'mysql';
+const frontendDir = path.join(__dirname, '..', 'frontend');
 
-const SECRET_KEY = 'your-secret-key-change-this';
+// Security: Use environment variable for secret key
+const SECRET_KEY = process.env.JWT_SECRET || 'your-secret-key-change-this-in-production';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '24h'; // Token expires in 24 hours
+const REFRESH_TOKEN_SECRET = process.env.REFRESH_TOKEN_SECRET || 'your-refresh-secret-change-this-in-production';
+const REFRESH_TOKEN_EXPIRES_IN = process.env.REFRESH_TOKEN_EXPIRES_IN || '7d'; // Refresh token expires in 7 days
 
 // Middleware
-app.use(cors());
+const allowedOrigins = (process.env.FRONTEND_URLS || process.env.FRONTEND_URL || 'http://localhost:8000,http://localhost:3000,http://127.0.0.1:8000,http://127.0.0.1:3000')
+  .split(',')
+  .map(origin => origin.trim())
+  .filter(Boolean);
+
+app.use(cors({
+  origin: (origin, callback) => {
+    // Allow non-browser tools and local file-based testing.
+    if (!origin || origin === 'null' || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  credentials: true
+}));
 app.use(express.json());
+app.use(express.static(frontendDir));
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+// Security: Rate limiting for auth endpoints (basic implementation)
+const authAttempts = new Map();
+const RATE_LIMIT_WINDOW = 15 * 60 * 1000; // 15 minutes
+const MAX_ATTEMPTS = 5;
 
 // Middleware to verify JWT token
 const verifyToken = (req, res, next) => {
@@ -28,16 +61,43 @@ const verifyToken = (req, res, next) => {
   });
 };
 
+// Security: Check rate limit
+const checkRateLimit = (req, res, next) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  const now = Date.now();
+  const attempts = authAttempts.get(ip) || [];
+
+  // Remove old attempts outside the window
+  const recentAttempts = attempts.filter(time => now - time < RATE_LIMIT_WINDOW);
+
+  if (recentAttempts.length >= MAX_ATTEMPTS) {
+    return res.status(429).json({ error: 'Too many attempts. Try again later.' });
+  }
+
+  recentAttempts.push(now);
+  authAttempts.set(ip, recentAttempts);
+  next();
+};
+
 // Auth Routes
-app.post('/auth/register', async (req, res) => {
+app.post('/auth/register', checkRateLimit, async (req, res) => {
   const { username, email, password, name } = req.body;
 
   if (!username || !email || !password || !name) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
 
+  // Security: Validate input lengths and formats
+  if (password.length < 8) {
+    return res.status(400).json({ error: 'Password must be at least 8 characters long' });
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: 'Invalid email format' });
+  }
+
   try {
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const hashedPassword = await bcrypt.hash(password, 12); // Increased rounds for better security
     db.run(
       'INSERT INTO users (username, email, password, name) VALUES (?, ?, ?, ?)',
       [username, email, hashedPassword, name],
@@ -45,8 +105,18 @@ app.post('/auth/register', async (req, res) => {
         if (err) {
           return res.status(400).json({ error: 'Username or email already exists' });
         }
-        const token = jwt.sign({ id: this.lastID }, SECRET_KEY);
-        res.json({ message: 'User registered successfully', token, userId: this.lastID });
+        const token = jwt.sign({ id: this.lastID }, SECRET_KEY, { expiresIn: JWT_EXPIRES_IN });
+        const refreshToken = jwt.sign({ id: this.lastID }, REFRESH_TOKEN_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRES_IN });
+
+        // Store refresh token in database (you'll need to add this table)
+        db.run('INSERT INTO refresh_tokens (user_id, token) VALUES (?, ?)', [this.lastID, refreshToken]);
+
+        res.json({
+          message: 'User registered successfully',
+          token,
+          refreshToken,
+          userId: this.lastID
+        });
       }
     );
   } catch (error) {
@@ -54,7 +124,7 @@ app.post('/auth/register', async (req, res) => {
   }
 });
 
-app.post('/auth/login', (req, res) => {
+app.post('/auth/login', checkRateLimit, (req, res) => {
   const { username, password } = req.body;
 
   if (!username || !password) {
@@ -74,14 +144,67 @@ app.post('/auth/login', (req, res) => {
       return res.status(401).json({ error: 'Invalid username or password' });
     }
 
-    const token = jwt.sign({ id: user.id }, SECRET_KEY);
-    res.json({ 
-      message: 'Login successful', 
-      token, 
+    const token = jwt.sign({ id: user.id }, SECRET_KEY, { expiresIn: JWT_EXPIRES_IN });
+    const refreshToken = jwt.sign({ id: user.id }, REFRESH_TOKEN_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRES_IN });
+
+    // Store refresh token (replace existing ones for this user)
+    db.run('DELETE FROM refresh_tokens WHERE user_id = ?', [user.id]);
+    db.run('INSERT INTO refresh_tokens (user_id, token) VALUES (?, ?)', [user.id, refreshToken]);
+
+    res.json({
+      message: 'Login successful',
+      token,
+      refreshToken,
       userId: user.id,
       name: user.name
     });
   });
+});
+
+// Refresh Token Endpoint
+app.post('/auth/refresh', (req, res) => {
+  const { refreshToken } = req.body;
+
+  if (!refreshToken) {
+    return res.status(401).json({ error: 'Refresh token required' });
+  }
+
+  jwt.verify(refreshToken, REFRESH_TOKEN_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(401).json({ error: 'Invalid refresh token' });
+    }
+
+    // Check if refresh token exists in database
+    db.get('SELECT * FROM refresh_tokens WHERE token = ? AND user_id = ?', [refreshToken, decoded.id], (err, tokenRecord) => {
+      if (err || !tokenRecord) {
+        return res.status(401).json({ error: 'Invalid refresh token' });
+      }
+
+      // Generate new tokens
+      const newToken = jwt.sign({ id: decoded.id }, SECRET_KEY, { expiresIn: JWT_EXPIRES_IN });
+      const newRefreshToken = jwt.sign({ id: decoded.id }, REFRESH_TOKEN_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRES_IN });
+
+      // Update refresh token in database
+      db.run('UPDATE refresh_tokens SET token = ? WHERE user_id = ?', [newRefreshToken, decoded.id]);
+
+      res.json({
+        token: newToken,
+        refreshToken: newRefreshToken
+      });
+    });
+  });
+});
+
+// Logout Endpoint
+app.post('/auth/logout', verifyToken, (req, res) => {
+  const refreshToken = req.body.refreshToken;
+
+  // Remove refresh token from database
+  if (refreshToken) {
+    db.run('DELETE FROM refresh_tokens WHERE token = ?', [refreshToken]);
+  }
+
+  res.json({ message: 'Logged out successfully' });
 });
 
 app.get('/auth/user/:id', verifyToken, (req, res) => {
@@ -204,11 +327,17 @@ app.post('/submit-quiz', verifyToken, (req, res) => {
       const passed = percentage >= 60;
 
       // Update user progress
+      const progressQuery = isMySql
+        ? `INSERT INTO user_progress (user_id, level_id, status, score, completed_at)
+           VALUES (?, ?, ?, ?, NOW())
+           ON DUPLICATE KEY UPDATE status = VALUES(status), score = VALUES(score), completed_at = VALUES(completed_at)`
+        : `INSERT INTO user_progress (user_id, level_id, status, score, completed_at)
+           VALUES (?, ?, ?, ?, datetime('now'))
+           ON CONFLICT(user_id, level_id) DO UPDATE SET
+           status = excluded.status, score = excluded.score, completed_at = excluded.completed_at`;
+
       db.run(
-        `INSERT INTO user_progress (user_id, level_id, status, score, completed_at)
-         VALUES (?, ?, ?, ?, datetime('now'))
-         ON CONFLICT(user_id, level_id) DO UPDATE SET
-         status = excluded.status, score = excluded.score, completed_at = excluded.completed_at`,
+        progressQuery,
         [userId, levelId, passed ? 'completed' : 'attempted', score],
         (err) => {
           if (err) {
@@ -219,20 +348,31 @@ app.post('/submit-quiz', verifyToken, (req, res) => {
           if (passed) {
             const badgeName = `Level ${levelId} Master`;
             db.run(
-              `INSERT OR IGNORE INTO badges (user_id, level_id, badge_name)
-               VALUES (?, ?, ?)`,
+              isMySql
+                ? `INSERT IGNORE INTO badges (user_id, level_id, badge_name)
+                   VALUES (?, ?, ?)`
+                : `INSERT OR IGNORE INTO badges (user_id, level_id, badge_name)
+                   VALUES (?, ?, ?)`,
               [userId, levelId, badgeName]
             );
 
             // Unlock next level
             db.get(
-              'SELECT id FROM levels WHERE sequence_order = (SELECT sequence_order + 1 FROM levels WHERE id = ?)',
+              `SELECT next.id
+               FROM levels current
+               JOIN levels next
+                 ON next.category_id = current.category_id
+                AND next.sequence_order = current.sequence_order + 1
+               WHERE current.id = ?`,
               [levelId],
               (err, nextLevel) => {
                 if (nextLevel) {
                   db.run(
-                    `INSERT OR IGNORE INTO user_progress (user_id, level_id, status)
-                     VALUES (?, ?, 'unlocked')`,
+                    isMySql
+                      ? `INSERT IGNORE INTO user_progress (user_id, level_id, status)
+                         VALUES (?, ?, 'unlocked')`
+                      : `INSERT OR IGNORE INTO user_progress (user_id, level_id, status)
+                         VALUES (?, ?, 'unlocked')`,
                     [userId, nextLevel.id]
                   );
                 }
@@ -294,7 +434,22 @@ app.get('/progress/:userId', verifyToken, (req, res) => {
   );
 });
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+app.get('/', (req, res) => {
+  res.sendFile(path.join(frontendDir, 'index.html'));
 });
+
+app.get(/^(?!\/(auth|categories|levels|questions|submit-quiz|badges|progress|health)\b).*/, (req, res) => {
+  res.sendFile(path.join(frontendDir, 'index.html'));
+});
+
+function startServer(port = process.env.PORT || 5000) {
+  return app.listen(port, () => {
+    console.log(`Server running on port ${port}`);
+  });
+}
+
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = { app, startServer };

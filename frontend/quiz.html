@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Quiz - Interview Q&A Practice</title>
+    <script src="auth.js"></script>
+    <script src="ui.js"></script>
     <style>
         * {
             margin: 0;
@@ -455,7 +457,7 @@
     </div>
 
     <script>
-        const API_URL = 'http://localhost:5000';
+        const API_URL = window.APP_API_URL;
         let currentQuestionIndex = 0;
         let questions = [];
         let answers = {};
@@ -472,13 +474,6 @@
             return true;
         }
 
-        function getAuthHeaders() {
-            return {
-                'Authorization': `Bearer ${localStorage.getItem('token')}`,
-                'Content-Type': 'application/json'
-            };
-        }
-
         async function loadQuiz() {
             if (!checkAuth()) return;
 
@@ -492,9 +487,7 @@
 
             try {
                 console.log('Fetching questions from:', `${API_URL}/questions/${levelId}`);
-                const response = await fetch(`${API_URL}/questions/${levelId}`, {
-                    headers: getAuthHeaders()
-                });
+                const response = await authManager.authenticatedFetch(`${API_URL}/questions/${levelId}`);
 
                 console.log('Response status:', response.status, response.statusText);
                 if (!response.ok) throw new Error(`HTTP ${response.status}: Failed to load questions`);
@@ -516,6 +509,7 @@
                 console.error('Error loading quiz:', error);
                 document.getElementById('quiz-content').innerHTML = 
                     '<p style="color: #e74c3c; text-align: center;">Failed to load quiz questions: ' + error.message + '</p>';
+                ui.showToast(`Failed to load quiz: ${error.message}`, 'error');
             }
         }
 
@@ -597,9 +591,8 @@
             });
 
             try {
-                const response = await fetch(`${API_URL}/submit-quiz`, {
+                const response = await authManager.authenticatedFetch(`${API_URL}/submit-quiz`, {
                     method: 'POST',
-                    headers: getAuthHeaders(),
                     body: JSON.stringify({
                         levelId: levelId,
                         answers: answersObj
@@ -609,11 +602,13 @@
                 if (!response.ok) throw new Error('Failed to submit quiz');
 
                 const result = await response.json();
+                ui.showToast(result.passed ? 'Quiz submitted successfully.' : 'Quiz submitted. Review your answers below.', result.passed ? 'success' : 'info');
                 displayResult(result, answersObj);
             } catch (error) {
                 console.error('Error submitting quiz:', error);
                 document.getElementById('quiz-content').innerHTML = 
                     '<p style="color: #e74c3c; text-align: center;">Failed to submit quiz</p>';
+                ui.showToast('Failed to submit quiz.', 'error');
             }
         }
 

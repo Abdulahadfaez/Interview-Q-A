@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dashboard - Interview Q&A Practice</title>
+    <script src="auth.js"></script>
+    <script src="ui.js"></script>
     <style>
         * {
             margin: 0;
@@ -120,6 +122,24 @@
             font-weight: 600;
             margin-bottom: 20px;
             color: #333;
+        }
+
+        .toolbar {
+            display: grid;
+            grid-template-columns: minmax(0, 1.6fr) minmax(180px, 1fr);
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        .toolbar input,
+        .toolbar select {
+            width: 100%;
+            padding: 14px 16px;
+            border: 1px solid #dbe4f0;
+            border-radius: 12px;
+            background: white;
+            font-size: 14px;
+            box-shadow: 0 10px 25px rgba(15, 23, 42, 0.04);
         }
 
         .categories-grid {
@@ -242,6 +262,43 @@
             padding: 20px;
         }
 
+        .empty-state {
+            padding: 32px;
+            background: white;
+            border-radius: 12px;
+            text-align: center;
+            color: #64748b;
+            box-shadow: 0 10px 25px rgba(15, 23, 42, 0.05);
+        }
+
+        .pagination {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 40px;
+        }
+
+        .pagination button {
+            border: none;
+            background: white;
+            color: #334155;
+            padding: 10px 14px;
+            border-radius: 10px;
+            cursor: pointer;
+            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.07);
+        }
+
+        .pagination button:disabled {
+            opacity: 0.45;
+            cursor: not-allowed;
+        }
+
+        .pagination span {
+            font-size: 14px;
+            color: #64748b;
+        }
+
         @media (max-width: 768px) {
             .categories-grid {
                 grid-template-columns: 1fr;
@@ -253,6 +310,10 @@
 
             .header h1 {
                 font-size: 24px;
+            }
+
+            .toolbar {
+                grid-template-columns: 1fr;
             }
 
             .navbar {
@@ -297,11 +358,21 @@
         <div class="stats-grid" id="stats-container"></div>
 
         <div class="section-title">Available Categories</div>
+        <div class="toolbar">
+            <input id="category-search" type="search" placeholder="Search categories, skills, or topics">
+            <select id="category-filter">
+                <option value="all">All categories</option>
+                <option value="started">Started first</option>
+                <option value="completed">Completed first</option>
+                <option value="alphabetical">Alphabetical</option>
+            </select>
+        </div>
         <div class="categories-grid" id="categories-container">
             <div class="loading-container">
                 <div class="spinner"></div>
             </div>
         </div>
+        <div class="pagination" id="category-pagination" style="display: none;"></div>
 
         <div class="badges-section">
             <div class="section-title">Your Achievements</div>
@@ -312,24 +383,19 @@
     </div>
 
     <script>
-        const API_URL = 'http://localhost:5000';
+        const API_URL = window.APP_API_URL;
+        const PAGE_SIZE = 4;
+        let allCategories = [];
+        let filteredCategories = [];
+        let categoryProgress = {};
+        let currentPage = 1;
 
         function checkAuth() {
-            const token = localStorage.getItem('token');
-            const userId = localStorage.getItem('userId');
-            
-            if (!token || !userId) {
+            if (!authManager.isAuthenticated()) {
                 window.location.href = 'index.html';
                 return false;
             }
             return true;
-        }
-
-        function getAuthHeaders() {
-            return {
-                'Authorization': `Bearer ${localStorage.getItem('token')}`,
-                'Content-Type': 'application/json'
-            };
         }
 
         async function loadDashboard() {
@@ -337,38 +403,100 @@
 
             const userName = localStorage.getItem('userName');
             document.getElementById('user-name').textContent = userName || 'User';
+            bindToolbar();
+            ui.showPageLoader('Loading your dashboard...');
 
-            loadCategories();
-            loadBadges();
-            loadProgress();
+            try {
+                await Promise.all([loadCategories(), loadBadges(), loadProgress()]);
+            } finally {
+                ui.hidePageLoader();
+            }
         }
 
         async function loadCategories() {
             try {
-                const response = await fetch(`${API_URL}/categories`, {
-                    headers: getAuthHeaders()
-                });
+                const response = await fetch(`${API_URL}/categories`);
 
                 if (!response.ok) throw new Error('Failed to load categories');
 
                 const categories = await response.json();
-                displayCategories(categories);
+                allCategories = categories;
+                applyCategoryFilters();
             } catch (error) {
                 console.error('Error loading categories:', error);
                 document.getElementById('categories-container').innerHTML = 
                     '<p style="color: #e74c3c; text-align: center;">Failed to load categories</p>';
+                ui.showToast('Failed to load categories.', 'error');
             }
         }
 
-        function displayCategories(categories) {
+        function bindToolbar() {
+            document.getElementById('category-search').addEventListener('input', () => {
+                currentPage = 1;
+                applyCategoryFilters();
+            });
+
+            document.getElementById('category-filter').addEventListener('change', () => {
+                currentPage = 1;
+                applyCategoryFilters();
+            });
+        }
+
+        function applyCategoryFilters() {
+            const searchValue = document.getElementById('category-search').value.trim().toLowerCase();
+            const filterValue = document.getElementById('category-filter').value;
+
+            filteredCategories = allCategories
+                .filter(category => {
+                    const haystack = `${category.name} ${category.description}`.toLowerCase();
+                    return haystack.includes(searchValue);
+                })
+                .sort((left, right) => {
+                    const leftProgress = categoryProgress[left.id] || {};
+                    const rightProgress = categoryProgress[right.id] || {};
+                    const leftCompleted = leftProgress.completedLevels || 0;
+                    const rightCompleted = rightProgress.completedLevels || 0;
+
+                    if (filterValue === 'alphabetical') {
+                        return left.name.localeCompare(right.name);
+                    }
+
+                    if (filterValue === 'completed') {
+                        return rightCompleted - leftCompleted;
+                    }
+
+                    if (filterValue === 'started') {
+                        const leftStarted = leftCompleted + (leftProgress.unlockedLevels || 0);
+                        const rightStarted = rightCompleted + (rightProgress.unlockedLevels || 0);
+                        return rightStarted - leftStarted;
+                    }
+
+                    return 0;
+                });
+
+            renderCategoryPage();
+        }
+
+        function renderCategoryPage() {
             const container = document.getElementById('categories-container');
-            container.innerHTML = categories.map(category => `
+            const totalPages = Math.max(1, Math.ceil(filteredCategories.length / PAGE_SIZE));
+            currentPage = Math.min(currentPage, totalPages);
+            const startIndex = (currentPage - 1) * PAGE_SIZE;
+            const pageItems = filteredCategories.slice(startIndex, startIndex + PAGE_SIZE);
+
+            if (pageItems.length === 0) {
+                container.innerHTML = '<div class="empty-state">No categories match your search. Try another keyword.</div>';
+                renderPagination(totalPages);
+                return;
+            }
+
+            container.innerHTML = pageItems.map(category => `
                 <div class="category-card" data-category-id="${category.id}" data-category-name="${category.name.replace(/"/g, '&quot;')}">
                     <div class="category-icon">${category.icon || '📚'}</div>
                     <div class="category-name">${category.name}</div>
                     <div class="category-description">${category.description}</div>
                     <div class="progress-bar">
-                        <div class="progress-fill" style="width: 0%"></div>
+                        <div class="progress-fill" style="width: ${Math.round((((categoryProgress[category.id] || {}).completedLevels || 0) / (((categoryProgress[category.id] || {}).totalLevels || 5))) * 100) || 0}%"></div>
                     </div>
                     <div class="progress-text">Start learning →</div>
                 </div>
@@ -382,6 +510,29 @@
                     goToLevels(categoryId, categoryName);
                 });
             });
+            renderPagination(totalPages);
+        }
+
+        function renderPagination(totalPages) {
+            const pagination = document.getElementById('category-pagination');
+
+            if (filteredCategories.length <= PAGE_SIZE) {
+                pagination.style.display = 'none';
+                pagination.innerHTML = '';
+                return;
+            }
+
+            pagination.style.display = 'flex';
+            pagination.innerHTML = `
+                <button onclick="changePage(-1)" ${currentPage === 1 ? 'disabled' : ''}>Previous</button>
+                <span>Page ${currentPage} of ${totalPages}</span>
+                <button onclick="changePage(1)" ${currentPage === totalPages ? 'disabled' : ''}>Next</button>
+            `;
+        }
+
+        function changePage(direction) {
+            currentPage += direction;
+            renderCategoryPage();
         }
 
         function goToLevels(categoryId, categoryName) {
@@ -393,6 +544,7 @@
             const payloadStr = JSON.stringify(payload);
             console.log('Setting currentCategory to localStorage:', payloadStr);
             localStorage.setItem('currentCategory', payloadStr);
+            ui.showToast(`Opening ${categoryName}...`, 'info');
             console.log('Navigating to levels.html');
             setTimeout(() => {
                 window.location.href = 'levels.html';
@@ -402,9 +554,7 @@
         async function loadBadges() {
             try {
                 const userId = localStorage.getItem('userId');
-                const response = await fetch(`${API_URL}/badges/${userId}`, {
-                    headers: getAuthHeaders()
-                });
+                const response = await authManager.authenticatedFetch(`${API_URL}/badges/${userId}`);
 
                 if (!response.ok) throw new Error('Failed to load badges');
 
@@ -412,6 +562,7 @@
                 displayBadges(badges);
             } catch (error) {
                 console.error('Error loading badges:', error);
+                ui.showToast('Could not load badges right now.', 'error');
             }
         }
 
@@ -436,16 +587,20 @@
         async function loadProgress() {
             try {
                 const userId = localStorage.getItem('userId');
-                const response = await fetch(`${API_URL}/progress/${userId}`, {
-                    headers: getAuthHeaders()
-                });
+                const response = await authManager.authenticatedFetch(`${API_URL}/progress/${userId}`);
 
                 if (!response.ok) throw new Error('Failed to load progress');
 
                 const progress = await response.json();
+                categoryProgress = progress.reduce((acc, item) => {
+                    acc[item.categoryId] = item;
+                    return acc;
+                }, {});
+                applyCategoryFilters();
                 displayStats(progress);
             } catch (error) {
                 console.error('Error loading progress:', error);
+                ui.showToast('Could not load progress summary.', 'error');
             }
         }
 
@@ -476,12 +631,8 @@
 
         function logout() {
             if (confirm('Are you sure you want to logout?')) {
-                localStorage.removeItem('token');
-                localStorage.removeItem('userId');
-                localStorage.removeItem('userName');
-                localStorage.removeItem('ageGroup');
-                localStorage.removeItem('currentCategory');
-                window.location.href = 'index.html';
+                ui.showToast('Logging out...', 'info');
+                authManager.logout();
             }
         }
 

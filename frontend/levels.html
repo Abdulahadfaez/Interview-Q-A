@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Levels - Interview Q&A Practice</title>
+    <script src="auth.js"></script>
+    <script src="ui.js"></script>
     <style>
         * {
             margin: 0;
@@ -267,7 +269,7 @@
     </div>
 
     <script>
-        const API_URL = 'http://localhost:5000';
+        const API_URL = window.APP_API_URL;
 
         function checkAuth() {
             const token = localStorage.getItem('token');
@@ -278,13 +280,6 @@
                 return false;
             }
             return true;
-        }
-
-        function getAuthHeaders() {
-            return {
-                'Authorization': `Bearer ${localStorage.getItem('token')}`,
-                'Content-Type': 'application/json'
-            };
         }
 
         function goBack() {
@@ -328,14 +323,9 @@
 
             try {
                 const url = `${API_URL}/levels/${currentCategory.id}`;
-                const headers = getAuthHeaders();
                 console.log('Fetching from URL:', url);
-                console.log('With headers:', Object.keys(headers));
                 
-                const response = await fetch(url, {
-                    method: 'GET',
-                    headers: headers
-                });
+                const response = await authManager.authenticatedFetch(url);
 
                 console.log('Response received - status:', response.status, response.statusText);
                 
@@ -355,6 +345,7 @@
                 console.error('✗ Error loading levels:', error.message);
                 document.getElementById('levels-container').innerHTML = 
                     '<p style="color: #e74c3c; text-align: center; padding: 40px;">Failed to load levels: ' + error.message + '</p>';
+                ui.showToast(`Failed to load levels: ${error.message}`, 'error');
             }
         }
 
@@ -422,6 +413,7 @@
             if (!levelId) return;
             
             localStorage.setItem('currentLevel', levelId);
+            ui.showToast('Starting quiz...', 'success');
             window.location.href = 'quiz.html';
         }
 

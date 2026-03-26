@@ -59,16 +59,38 @@ npm install
 ### 2. Start the Backend Server
 
 ```bash
+# From the project root
+.\start-backend.cmd
+
+# Or from the backend folder
+cd backend
 npm start
 ```
 
 The server will start on `http://localhost:5000`
+
+Do not run `server.js`, `server node.js`, or `server.node.js` directly in PowerShell. Use `.\start-backend.cmd`, `npm start`, `node server.js`, or `.\server` instead.
 
 **Output:**
 ```
 Connected to SQLite database
 Server running on port 5000
 ```
+
+## Render Deployment
+
+This project is ready to deploy to Render as a single Node web service.
+
+1. Push the repository to GitHub.
+2. In Render, create a new Blueprint and select this repo.
+3. Render will read [`render.yaml`](c:/Users/hp/OneDrive/Desktop/trial/render.yaml) and create:
+   - one Node web service
+   - one persistent disk for SQLite at `/var/data`
+4. After the first deploy, set `FRONTEND_URLS` to your Render app URL:
+   - example: `https://your-app-name.onrender.com`
+5. Open your Render URL. The backend and frontend are served from the same service.
+
+Important: SQLite needs persistent storage on Render. This setup uses `DB_PATH=/var/data/app.db` so your data survives redeploys.
 
 ### 3. Access Frontend
 

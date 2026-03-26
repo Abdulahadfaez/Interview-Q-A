@@ -39,9 +39,11 @@ Then choose ONE of these options:
 ### 🔵 OPTION B: Manual Start (More Control)
 ```powershell
 # Terminal 1: Start Backend
-cd backend
-npm install
-npm start
+.\start-backend.cmd
+
+# Or, if you are already inside backend:
+# npm install
+# npm start
 
 # Terminal 2 (Open NEW PowerShell): Start Frontend
 cd "C:\Users\hp\OneDrive\Desktop\trial\frontend"
@@ -50,6 +52,8 @@ python -m http.server 8000
 # Browser: Go to
 http://localhost:8000
 ```
+
+Avoid commands like `server.node.js` or `server node.js` in PowerShell. This project starts with `.\start-backend.cmd`, `npm start`, `node server.js`, or `.\server`.
 
 ---
 

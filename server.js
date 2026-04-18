@@ -30,8 +30,8 @@ app.use(cors({
       return callback(null, true);
     }
 
-    // Allow local development origins automatically.
-    if (allowedOrigins.includes(origin) || origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')) {
+    // Allow local development origins and Render deployments automatically.
+    if (allowedOrigins.includes(origin) || origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1') || origin.endsWith('.onrender.com')) {
       return callback(null, true);
     }
 

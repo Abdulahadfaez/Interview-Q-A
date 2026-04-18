@@ -9,7 +9,7 @@ const { getDatabase } = require('./database');
 const app = express();
 const db = getDatabase();
 const isMySql = db.dialect === 'mysql';
-const frontendDir = path.join(__dirname, '..', 'frontend');
+const frontendDir = path.join(__dirname, 'frontend');
 
 // Security: Use environment variable for secret key
 const SECRET_KEY = process.env.JWT_SECRET || 'your-secret-key-change-this-in-production';

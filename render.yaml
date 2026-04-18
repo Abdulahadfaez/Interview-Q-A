@@ -2,7 +2,7 @@ services:
   - type: web
     name: interview-qa-practice
     runtime: node
-    rootDir: backend
+    rootDir: .
     buildCommand: npm install
     startCommand: npm start
     plan: free
